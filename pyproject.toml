@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kernel_louis"
+version = "0.1.0"
+description = "Exact In-Context Leave-One-Out Scores and Modulation for Interpretable Tabular Foundation Models"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Anonymous Authors" }
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.2",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+tabicl = [
+    "torch>=2.0",
+    "tabicl",
+    "tabpfn",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kernel_louis*"]
