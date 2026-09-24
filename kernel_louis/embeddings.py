@@ -80,7 +80,13 @@ def extract_symmetric_embeddings(
             clf.predict_proba(np.asarray(Q, np.float32))
         finally:
             h.remove()
-        E = torch.cat([b[0, n_ctx:] for b in blocks], dim=0).numpy()
+        embs = [b.mean(dim=0)[n_ctx:] for b in blocks]
+        if sum(e.shape[0] for e in embs) == len(Q):
+            E = torch.cat(embs, dim=0).numpy()
+        elif len(embs) > 0 and embs[0].shape[0] == len(Q):
+            E = torch.stack(embs, dim=0).mean(dim=0).numpy()
+        else:
+            E = embs[0].numpy()
         assert E.shape[0] == len(Q), f"Shape mismatch: {E.shape} vs {len(Q)}"
         return E
 
