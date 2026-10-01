@@ -7,7 +7,11 @@ from kernel_louis.kernels import default_gamma, gaussian_kernel
 from kernel_louis.heads import self_normalized_predict, gp_predict
 from kernel_louis.loo import incontext_loo_nll, gp_loo_logdensity, press_residuals
 from kernel_louis.modulation import tail_multiplier, smooth_multiplier, exponential_multiplier
-from kernel_louis.audit import audit_kernel_head_influence
+from kernel_louis.audit import (
+    audit_kernel_head_influence,
+    audit_context_admission,
+    compute_audit_metrics,
+)
 
 
 def test_soft_vote_loo_exactness():
@@ -106,3 +110,29 @@ def test_context_influence_audit_exactness():
 
     audit = audit_kernel_head_influence(K_qt, K_tr, ytr, del_idx=5)
     np.testing.assert_allclose(audit["discrepancy"], 0.0, atol=1e-12)
+
+
+def test_context_admission_audit_exactness():
+    """Verify that on fixed features, admission remainder rho_z is identically 0 (Eq. 12)."""
+    rng = np.random.default_rng(101)
+    Xtr = rng.normal(0, 1, (30, 3))
+    ytr = rng.integers(0, 2, size=30)
+    Xq = rng.normal(0, 1, (8, 3))
+    z = rng.normal(0, 1, (1, 3))
+    v = 1.0
+
+    gamma = default_gamma(3)
+    K_qt = gaussian_kernel(Xq, Xtr, gamma)
+    k_qz = gaussian_kernel(Xq, z, gamma)
+
+    audit = audit_context_admission(K_qt, k_qz, ytr, candidate_label=v)
+    np.testing.assert_allclose(audit["remainder"], 0.0, atol=1e-12)
+    assert audit["max_abs_remainder"] < 1e-12
+
+    # Verify Table 1 audit metrics computation
+    metrics = compute_audit_metrics(audit["actual_addition_effect"], audit["closed_form_addition"])
+    assert metrics["rms"] < 1e-12
+    assert metrics["bias"] < 1e-12
+    assert metrics["sign_agreement"] == 1.0
+    assert metrics["top_k_overlap"] == 1.0
+

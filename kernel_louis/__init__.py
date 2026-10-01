@@ -39,6 +39,8 @@ from kernel_louis.evaluation import (
 )
 from kernel_louis.audit import (
     audit_kernel_head_influence,
+    audit_context_admission,
+    compute_audit_metrics,
 )
 from kernel_louis.models import (
     KernelICLClassifier,
@@ -68,5 +70,7 @@ __all__ = [
     "compute_tail_precision_recall",
     "weight_perplexity",
     "audit_kernel_head_influence",
+    "audit_context_admission",
+    "compute_audit_metrics",
     "KernelICLClassifier",
 ]
