@@ -10,6 +10,7 @@ from typing import Optional
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
+from threadpoolctl import threadpool_limits
 
 
 def make_logreg(C: float = 1.0, max_iter: int = 2000) -> LogisticRegression:
@@ -24,12 +25,17 @@ def fit_weighted_logreg(X: np.ndarray, y: np.ndarray, m: Optional[np.ndarray] = 
     Points with m = 0 are dropped and the remaining weights rescaled to mean 1:
     scikit-learn sums weighted losses, so unscaled upweighting would also weaken
     the effective regularisation.
+
+    The fit runs single-threaded: its many small matrix products are much slower
+    when several BLAS/OpenMP thread pools compete for a few cores (measured on
+    Colab: 3.9 s with default threads vs 0.4 s single-threaded).
     """
     m = np.ones(len(y)) if m is None else np.asarray(m, dtype=float)
     keep = m > 0
     weights = m[keep] / m[keep].mean()
     clf = make_logreg(C, max_iter)
-    clf.fit(X[keep], y[keep], sample_weight=weights)
+    with threadpool_limits(limits=1):
+        clf.fit(X[keep], y[keep], sample_weight=weights)
     return clf
 
 

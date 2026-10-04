@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from kernel_louis.kernels import gaussian_kernel, log_gaussian_kernel, median_heuristic_gamma
+from kernel_louis.kernels import gaussian_kernel, log_gaussian_kernel, median_heuristic_gamma, squared_distances
 from kernel_louis.heads import kernel_head_proba, self_normalized_predict
 from kernel_louis.loo import (
     crossfit_difficulty,
@@ -322,3 +322,50 @@ def test_small_cnn_feature_shape():
     model = SmallCNN().eval()
     feats = extract_features(model, np.zeros((5, 28, 28), dtype=np.uint8))
     assert feats.shape == (5, 128) and feats.dtype == np.float64
+
+
+def test_thread_limit_does_not_change_results():
+    """Single-threaded fitting gives the same model; the thread setting is restored afterwards."""
+    from threadpoolctl import threadpool_info
+    X, y, _, _ = random_problem(seed=10, n=150)
+    before = [pool["num_threads"] for pool in threadpool_info()]
+    L_default = crossfit_difficulty(make_logreg(), X, y, n_splits=5)
+    L_single = crossfit_difficulty(make_logreg(), X, y, n_splits=5, max_threads=1)
+    np.testing.assert_allclose(L_default, L_single, atol=1e-6)
+    a = fit_weighted_logreg(X, y)
+    assert [pool["num_threads"] for pool in threadpool_info()] == before
+    np.testing.assert_allclose(a.predict_proba(X), make_logreg().fit(X, y).predict_proba(X), atol=1e-6)
+
+
+def test_loo_kernel_from_log_matches_plain_kernel_and_survives_narrow_bandwidth():
+    from kernel_louis.loo import loo_kernel_from_log
+    X, y, _, gamma = random_problem(seed=11)
+    log_K = log_gaussian_kernel(X, X, gamma)
+    P_plain, _ = frozen_loo_proba(np.exp(log_K), y, 4)
+    P_stable, _ = frozen_loo_proba(loo_kernel_from_log(log_K), y, 4)
+    np.testing.assert_allclose(P_stable, P_plain, atol=1e-12)
+    # At 1e4 x the bandwidth every off-diagonal exp() underflows, but the stable version
+    # still gives each point's nearest neighbour all the weight.
+    log_K_narrow = log_gaussian_kernel(X, X, 1e4 * gamma)
+    _, n_zero_plain = frozen_loo_proba(np.exp(log_K_narrow), y, 4)
+    P_narrow, n_zero = frozen_loo_proba(loo_kernel_from_log(log_K_narrow), y, 4)
+    assert n_zero_plain > 0 and n_zero == 0
+    D = squared_distances(X, X) + np.diag(np.full(len(y), np.inf))
+    np.testing.assert_allclose(P_narrow.argmax(axis=1), y[D.argmin(axis=1)])
+
+
+def test_select_gamma_loo_maximises_brute_force_loo_likelihood():
+    from kernel_louis.loo import select_gamma_loo
+    X, y, _, gamma0 = random_problem(seed=12, n=60)
+    gammas = gamma0 * np.geomspace(1, 100, 7)
+    best, loo_ll = select_gamma_loo(squared_distances(X, X), y, 4, gammas)
+    brute = []
+    for gamma in gammas:
+        ll = 0.0
+        for i in range(len(y)):
+            keep = np.arange(len(y)) != i
+            proba, _ = kernel_head_proba(log_gaussian_kernel(X[i:i + 1], X[keep], gamma), y[keep], 4)
+            ll += np.log(max(proba[0, y[i]], 1e-12))
+        brute.append(ll / len(y))
+    np.testing.assert_allclose(loo_ll, brute, atol=1e-9)
+    assert best == gammas[int(np.argmax(brute))]

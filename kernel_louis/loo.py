@@ -24,6 +24,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold
+from threadpoolctl import threadpool_limits
 
 
 def incontext_loo_nll(
@@ -31,6 +32,7 @@ def incontext_loo_nll(
     y_train: np.ndarray,
     eps: float = 1e-12,
     return_probs: bool = False,
+    max_threads: Optional[int] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """Exact in-context leave-one-out NLL difficulty score (Eq. 3).
 
@@ -160,6 +162,44 @@ def frozen_loo_score(
     return 1.0 - P_loo[np.arange(len(y)), y], n_zero
 
 
+def loo_kernel_from_log(log_K_tr: np.ndarray) -> np.ndarray:
+    """Context kernel for the frozen LOO, computed stably from log-affinities.
+
+    Returns exp(log K) with a zero diagonal and each row divided by its largest
+    off-diagonal entry. The row scaling cancels in the renormalised frozen LOO
+    (paper Eq. A.13), so frozen_loo_proba gives the same result as with exp(log K),
+    but a narrow bandwidth no longer underflows to all-zero rows.
+    """
+    L = np.array(log_K_tr, dtype=float, copy=True)
+    np.fill_diagonal(L, -np.inf)
+    L -= L.max(axis=1, keepdims=True)
+    return np.exp(L)
+
+
+def select_gamma_loo(
+    sq_dists: np.ndarray,
+    y_train: np.ndarray,
+    n_classes: int,
+    gammas: np.ndarray,
+    eps: float = 1e-12,
+) -> Tuple[float, np.ndarray]:
+    """Gaussian bandwidth chosen by leave-one-out likelihood on the context.
+
+    For each gamma, K = exp(-gamma * sq_dists) and the frozen LOO probability of
+    every point's own label (paper Eq. 9 / A.13) is computed. Returns the gamma
+    with the largest mean log p^{fr,-i}(y_i), and that mean for every gamma.
+    Uses only the context labels: this is leave-one-out cross-validation of the
+    normalised kernel head's bandwidth.
+    """
+    y = np.asarray(y_train, dtype=int)
+    rows = np.arange(len(y))
+    loo_ll = np.zeros(len(gammas))
+    for k, gamma in enumerate(gammas):
+        P_loo, _ = frozen_loo_proba(loo_kernel_from_log(-gamma * sq_dists), y, n_classes)
+        loo_ll[k] = np.mean(np.log(np.clip(P_loo[rows, y], eps, 1.0)))
+    return float(gammas[int(np.argmax(loo_ll))]), loo_ll
+
+
 def gp_loo_precision(K_tr: np.ndarray, sigma2: float) -> np.ndarray:
     """Q = (K + sigma2 I)^-1 via a Cholesky factorisation.
 
@@ -205,6 +245,7 @@ def crossfit_difficulty(
     random_state: int = 42,
     eps: float = 1e-12,
     return_probs: bool = False,
+    max_threads: Optional[int] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """Black-box K-fold cross-fitted out-of-fold NLL surrogate score.
     Used when foundation model internal embeddings or heads are inaccessible.
@@ -212,17 +253,20 @@ def crossfit_difficulty(
     clf_factory is either a function returning a fresh classifier or an unfitted
     scikit-learn estimator (cloned for every fold). Works for any number of classes.
     With return_probs=True, also returns the out-of-fold probability of the true label.
+    max_threads limits BLAS/OpenMP threads during the fits (1 is much faster for
+    small models such as logistic regression when thread pools compete).
     """
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=int)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     p_true = np.zeros(len(y), dtype=float)
 
-    for tr_idx, oof_idx in skf.split(X, y):
-        clf = clone(clf_factory) if hasattr(clf_factory, "fit") else clf_factory()
-        clf.fit(X[tr_idx], y[tr_idx])
-        probs = clf.predict_proba(X[oof_idx])
-        p_true[oof_idx] = true_class_proba(probs, clf.classes_, y[oof_idx])
+    with threadpool_limits(limits=max_threads):
+        for tr_idx, oof_idx in skf.split(X, y):
+            clf = clone(clf_factory) if hasattr(clf_factory, "fit") else clf_factory()
+            clf.fit(X[tr_idx], y[tr_idx])
+            probs = clf.predict_proba(X[oof_idx])
+            p_true[oof_idx] = true_class_proba(probs, clf.classes_, y[oof_idx])
 
     L = -np.log(np.clip(p_true, eps, 1.0))
     if return_probs:
