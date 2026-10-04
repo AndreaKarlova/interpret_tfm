@@ -1,33 +1,71 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kernel_louis"
+name = "interpret_tfm"
 version = "0.1.0"
-description = "Exact In-Context Leave-One-Out Scores and Modulation for Interpretable Tabular Foundation Models"
+description = "Exact In-Context Leave-One-Out Scores and Modulation for Interpretable Tabular Foundation Models, with a KernelICL fork of TabICL"
 readme = "README.md"
-requires-python = ">=3.9"
+# The TabICL fork uses 3.10 syntax at runtime.
+requires-python = ">=3.10"
 authors = [
     { name = "Anonymous Authors" }
 ]
 dependencies = [
+    # kernel_louis
     "numpy>=1.24",
     "scipy>=1.10",
-    "scikit-learn>=1.2",
+    "scikit-learn>=1.3.0",
     "matplotlib>=3.7",
+    # tabicl (the fork in src/tabicl)
+    "torch>=2.2",  # to enjoy Flash Attention v2
+    "einops>=0.7",  # only used for rope
+    "psutil",  # memory calculation at inference
+    "tqdm>=4.64.0",
+    "huggingface-hub",
 ]
 
 [project.optional-dependencies]
+# Do not add "tabicl" here: src/tabicl provides that import name, and the PyPI
+# package would shadow the fork.
+tabpfn = [
+    "tabpfn",
+]
+# kernelicl/ analysis scripts.
+kernelicl = [
+    "pandas",
+    "umap-learn",
+]
+# Synthetic prior, needed by kernelicl/kernelicl_finetune.py.
+pretrain = [
+    "transformers",  # only used in optim for schedules
+    "xgboost",  # used in the TabICLv1 prior
+    "wandb",  # logging in pre-training
+]
+finetune = [
+    "transformers",  # get_scheduler reuses the pretraining cosine-warmup schedules
+    "wandb",  # optional, only engaged when wandb_kwargs is passed
+]
+forecast = [
+    "pandas>=2.1.2",
+    "statsmodels>=0.14.5",  # seasonal detection
+    "matplotlib>=3.10.3",  # plotting
+]
+shap = [
+    "shap>=0.42",
+    "shapiq>=1.0",
+    "matplotlib>=3.10.3",
+    "numba",
+]
 dev = [
     "pytest>=7.0",
+    "pandas",
 ]
-tabicl = [
-    "torch>=2.0",
-    "tabicl",
-    "tabpfn",
+all = [
+    "interpret_tfm[tabpfn,kernelicl,pretrain,finetune,forecast,shap,dev]",
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["kernel_louis*"]
+where = [".", "src"]
+include = ["kernel_louis*", "tabicl*"]
