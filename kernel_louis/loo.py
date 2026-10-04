@@ -21,6 +21,8 @@ Eq. (4): Deep Gaussian Process LOO (Rasmussen & Williams 2006):
 
 from typing import Callable, Optional, Tuple, Union
 import numpy as np
+from scipy.linalg import cho_factor, cho_solve
+from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold
 
 
@@ -117,6 +119,84 @@ def gp_loo_logdensity(
     return -log_dens
 
 
+def frozen_loo_proba(
+    K_tr: np.ndarray,
+    y_train: np.ndarray,
+    n_classes: int,
+) -> Tuple[np.ndarray, int]:
+    """Frozen-head LOO class probabilities for every context point (paper Eq. A.13).
+
+    Row i predicts x_i from the other context points: the diagonal affinity is
+    removed and the remaining weights renormalised, with the kernel held fixed.
+
+    Returns
+    -------
+    P_loo : (n, C) probabilities; rows with a zero retained denominator are all zero
+    n_zero : number of such rows
+    """
+    y = np.asarray(y_train, dtype=int)
+    K = np.array(K_tr, dtype=float, copy=True)
+    np.fill_diagonal(K, 0.0)
+    denom = K.sum(axis=1)
+    zero = denom <= 0
+    Y = np.eye(n_classes)[y]
+    P_loo = (K @ Y) / np.where(zero, 1.0, denom)[:, None]
+    P_loo[zero] = 0.0
+    return P_loo, int(zero.sum())
+
+
+def frozen_loo_score(
+    K_tr: np.ndarray,
+    y_train: np.ndarray,
+    n_classes: int,
+) -> Tuple[np.ndarray, int]:
+    """Frozen-head difficulty score of paper Eq. 9, L_i = 1 - p^{fr,-i}(y_i), in [0, 1].
+
+    Same ranking as incontext_loo_nll (which returns -log p). A zero retained
+    denominator gives L_i = 1. Returns (L, n_zero).
+    """
+    y = np.asarray(y_train, dtype=int)
+    P_loo, n_zero = frozen_loo_proba(K_tr, y, n_classes)
+    return 1.0 - P_loo[np.arange(len(y)), y], n_zero
+
+
+def gp_loo_precision(K_tr: np.ndarray, sigma2: float) -> np.ndarray:
+    """Q = (K + sigma2 I)^-1 via a Cholesky factorisation.
+
+    The frozen-covariance GP LOO identities (paper Eq. A.20) need only Q, and Q
+    does not depend on the labels, so it can be reused across label sets.
+    """
+    n = len(K_tr)
+    factor = cho_factor(K_tr + sigma2 * np.eye(n), lower=True)
+    return cho_solve(factor, np.eye(n))
+
+
+def gp_loo_score_multiclass(
+    Q: np.ndarray,
+    y_train: np.ndarray,
+    n_classes: int,
+) -> np.ndarray:
+    """Multiclass GP LOO score (paper Eq. A.20) on one-hot targets.
+
+    For each class c: mu_ic = Y_ic - (Q Y)_ic / Q_ii and v_i = 1 / Q_ii.
+    Returns L_i = mean_c [-log N(Y_ic | mu_ic, v_i)] (higher = harder).
+    """
+    Y = np.eye(n_classes)[np.asarray(y_train, dtype=int)]
+    d = np.diag(Q)
+    mu = Y - (Q @ Y) / d[:, None]
+    v = 1.0 / d
+    nll = 0.5 * np.log(2.0 * np.pi * v)[:, None] + 0.5 * (Y - mu) ** 2 / v[:, None]
+    return nll.mean(axis=1)
+
+
+def true_class_proba(proba: np.ndarray, classes: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Probability each row assigns to its own label y; 0 if y is not in `classes`."""
+    classes = np.asarray(classes)
+    col = np.clip(np.searchsorted(classes, y), 0, len(classes) - 1)
+    known = classes[col] == y
+    return np.where(known, proba[np.arange(len(y)), col], 0.0)
+
+
 def crossfit_difficulty(
     clf_factory: Callable[[], object],
     X: np.ndarray,
@@ -124,9 +204,14 @@ def crossfit_difficulty(
     n_splits: int = 4,
     random_state: int = 42,
     eps: float = 1e-12,
-) -> np.ndarray:
+    return_probs: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """Black-box K-fold cross-fitted out-of-fold NLL surrogate score.
     Used when foundation model internal embeddings or heads are inaccessible.
+
+    clf_factory is either a function returning a fresh classifier or an unfitted
+    scikit-learn estimator (cloned for every fold). Works for any number of classes.
+    With return_probs=True, also returns the out-of-fold probability of the true label.
     """
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=int)
@@ -134,10 +219,12 @@ def crossfit_difficulty(
     p_true = np.zeros(len(y), dtype=float)
 
     for tr_idx, oof_idx in skf.split(X, y):
-        clf = clf_factory()
+        clf = clone(clf_factory) if hasattr(clf_factory, "fit") else clf_factory()
         clf.fit(X[tr_idx], y[tr_idx])
         probs = clf.predict_proba(X[oof_idx])
-        p1 = probs[:, 1] if probs.ndim == 2 else probs
-        p_true[oof_idx] = np.where(y[oof_idx] == 1, p1, 1.0 - p1)
+        p_true[oof_idx] = true_class_proba(probs, clf.classes_, y[oof_idx])
 
-    return -np.log(np.clip(p_true, eps, 1.0))
+    L = -np.log(np.clip(p_true, eps, 1.0))
+    if return_probs:
+        return L, p_true
+    return L

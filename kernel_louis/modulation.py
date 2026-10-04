@@ -4,8 +4,9 @@ Implements:
 1. Tail-set multiplier (Eq. 8, recommended): m_i = 1 + lam * 1[L_i >= Q_tau(L)]
 2. Smooth linear multiplier (Eq. 9): m_i = 1 + lam * L_tilde_i
 3. Exponential multiplier (Eq. 10, unstable cautionary): m_i = exp(gamma * L_tilde_i)
-4. Pseudo-group balancing (group-free analogue of DFR, Section 3.2)
-5. Context resampling (Eq. 11, data-centric surrogate with diversity capping)
+4. Pseudo-group and oracle group balancing (group-free / group-labelled DFR analogues)
+5. Random-tail and pruning rules, plus their random controls
+6. Context resampling (Eq. 11, data-centric surrogate with diversity capping)
 """
 
 from typing import Optional, Tuple
@@ -59,32 +60,73 @@ def exponential_multiplier(L: np.ndarray, gamma: float = 1.0) -> np.ndarray:
     return np.exp(float(gamma) * L_norm)
 
 
+def group_balance_multiplier(groups: np.ndarray) -> np.ndarray:
+    """Balance arbitrary groups: m_i = n / (#non-empty groups * |group of i|).
+
+    Every non-empty group receives the same total multiplier mass, and the
+    multipliers have mean 1. With true group labels this is the oracle balance.
+    """
+    groups = np.asarray(groups)
+    labels, inverse, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    return len(groups) / (len(labels) * counts[inverse].astype(float))
+
+
 def pseudo_group_balance(
     y: np.ndarray,
     L: np.ndarray,
     tau: float = 0.95,
 ) -> np.ndarray:
     """Pseudo-group balancing (Section 3.2):
-    Forms 4 cells from (class y in {0, 1} x LOO-hard in {0, 1}) and balances them,
-    serving as the group-label-free analogue of Deep Feature Reweighting (DFR).
+    Forms cells from (class y x LOO-hard in {0, 1}) and balances them, serving
+    as the group-label-free analogue of Deep Feature Reweighting (DFR).
+    Works for any number of classes; empty cells are ignored.
 
     Returns
     -------
-    weights : (n,) sample weights balancing the 4 pseudo-groups
+    weights : (n,) sample weights with mean 1, equal total weight per non-empty cell
     """
     y = np.asarray(y, dtype=int)
-    thr = np.quantile(L, tau)
-    hard = (L >= thr).astype(int)
-    pseudo_groups = 2 * y + hard
+    hard = (L >= np.quantile(L, tau)).astype(int)
+    return group_balance_multiplier(2 * y + hard)
 
-    weights = np.zeros(len(y), dtype=float)
-    for pg in range(4):
-        mask = pseudo_groups == pg
-        cnt = mask.sum()
-        if cnt > 0:
-            weights[mask] = 1.0 / cnt
-    # Normalize so mean weight is 1.0
-    return weights / (np.mean(weights) + 1e-12)
+
+def random_tail_multiplier(
+    n: int,
+    tail_size: int,
+    lam: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Control for tail_multiplier: m_i = 1 + lam on `tail_size` uniformly random points."""
+    m = np.ones(n)
+    m[rng.choice(n, size=tail_size, replace=False)] += float(lam)
+    return m
+
+
+def top_fraction_mask(L: np.ndarray, q: float) -> np.ndarray:
+    """Boolean mask of the round(q * n) highest scores (ties broken by lower index first)."""
+    n = len(L)
+    k = int(round(q * n))
+    order = np.argsort(-np.asarray(L), kind="stable")
+    mask = np.zeros(n, dtype=bool)
+    mask[order[:k]] = True
+    return mask
+
+
+def prune_multiplier(L: np.ndarray, q: float) -> np.ndarray:
+    """Pruning: m_i = 0 for the round(q * n) highest-score points, 1 otherwise."""
+    return np.where(top_fraction_mask(L, q), 0.0, 1.0)
+
+
+def random_prune_multiplier(n: int, q: float, rng: np.random.Generator) -> np.ndarray:
+    """Control for prune_multiplier: m_i = 0 for round(q * n) uniformly random points."""
+    m = np.ones(n)
+    m[rng.choice(n, size=int(round(q * n)), replace=False)] = 0.0
+    return m
+
+
+def surprisal_from_score(L: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """s_i = -log p_i with p_i = 1 - L_i clipped to [eps, 1], for scores of the form L = 1 - p."""
+    return -np.log(np.clip(1.0 - np.asarray(L, dtype=float), eps, 1.0))
 
 
 def resample_context(
@@ -95,11 +137,14 @@ def resample_context(
     max_mult: Optional[int] = None,
     target_unique: float = 0.5,
     rng: Optional[np.random.Generator] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    return_indices: bool = False,
+):
     """Sample in-context prompt with replacement prop. to weights (Eq. 11).
 
     Includes optional multiplicity cap `max_mult` to prevent collapsing context
-    diversity into duplicates of a tiny handful of points.
+    diversity into duplicates of a tiny handful of points. Pass
+    target_unique=None and max_mult=None for plain sampling with replacement.
+    With return_indices=True, also returns the sampled row indices.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -114,6 +159,8 @@ def resample_context(
 
     if max_mult is None or max_mult >= size:
         idx = rng.choice(n, size=size, replace=True, p=p)
+        if return_indices:
+            return X[idx], y[idx], idx
         return X[idx], y[idx]
 
     # Pool sampling with diversity cap
@@ -128,4 +175,6 @@ def resample_context(
         if len(keep) >= size:
             break
     idx = np.array(keep, dtype=int)
+    if return_indices:
+        return X[idx], y[idx], idx
     return X[idx], y[idx]

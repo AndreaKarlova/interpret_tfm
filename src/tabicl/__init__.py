@@ -1,3 +1,4 @@
+from .__about__ import __version__
 from ._model import InferenceConfig
 from ._sklearn import TabICLClassifier, TabICLRegressor
 

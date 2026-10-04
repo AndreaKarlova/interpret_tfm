@@ -24,13 +24,13 @@ def self_normalized_predict(
     Parameters
     ----------
     K_qt : (m, n) query-vs-context kernel matrix
-    y_train : (n,) binary context labels in {0, 1}
+    y_train : (n,) binary context labels in {0, 1}, or (n, C) one-hot labels
     m : (n,) optional non-negative multipliers m_i (m_i = 1 recovers baseline)
     eps : numerical stability constant
 
     Returns
     -------
-    proba1 : (m,) class 1 probability estimates
+    proba1 : (m,) class 1 probability estimates, or (m, C) for one-hot labels
     W : (m, n) self-normalized attention weights, each row sums to 1
     """
     if m is not None:
@@ -42,6 +42,49 @@ def self_normalized_predict(
     W = K_eff / denom
     proba1 = W @ np.asarray(y_train, dtype=float)
     return proba1, W
+
+
+def kernel_head_proba(
+    log_K_qt: np.ndarray,
+    y_train: np.ndarray,
+    n_classes: int,
+    m: Optional[np.ndarray] = None,
+    return_weights: bool = False,
+):
+    """Multiclass normalised kernel head (paper Eq. 4 / Eq. 13) computed in log space.
+
+    Each row's largest log-weight is subtracted before exponentiating, which
+    leaves the normalised weights unchanged but cannot underflow. Rows whose
+    weights are all zero (e.g. every multiplier m_i = 0) get uniform probabilities.
+
+    Parameters
+    ----------
+    log_K_qt : (q, n) log kernel between queries and context, e.g. log_gaussian_kernel
+    y_train : (n,) integer class labels in {0, ..., n_classes - 1}
+    n_classes : number of classes C
+    m : (n,) optional non-negative multipliers (paper Eq. 13); None means all ones
+
+    Returns
+    -------
+    proba : (q, C) class probabilities
+    n_zero : number of rows that fell back to uniform probabilities
+    W : (q, n) normalised weights, only if return_weights=True
+    """
+    n = log_K_qt.shape[1]
+    m = np.ones(n) if m is None else np.asarray(m, dtype=float)
+    with np.errstate(divide="ignore"):
+        log_W = log_K_qt + np.log(m)[None, :]  # m_i = 0 gives -inf, i.e. weight 0
+    row_max = np.max(log_W, axis=1, keepdims=True)
+    zero_rows = ~np.isfinite(row_max[:, 0])
+    row_max[zero_rows] = 0.0
+    K_shift = np.exp(log_W - row_max)
+
+    Y = np.eye(n_classes)[np.asarray(y_train, dtype=int)]
+    proba, W = self_normalized_predict(K_shift, Y)
+    proba[zero_rows] = 1.0 / n_classes
+    if return_weights:
+        return proba, int(zero_rows.sum()), W
+    return proba, int(zero_rows.sum())
 
 
 def gp_predict(

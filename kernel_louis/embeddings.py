@@ -45,15 +45,18 @@ def extract_symmetric_embeddings(
     clf: object,
     X_train: np.ndarray,
     y_train: np.ndarray,
-    X_query: np.ndarray,
+    X_query: Optional[np.ndarray] = None,
     hook_module_name: Optional[str] = None,
     projection: Optional[np.ndarray] = None,
     device: Optional[str] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Extract symmetric KernelICL embeddings h(.) for context and query points.
 
     Every point is embedded in QUERY position against the fixed training context,
     ensuring context and query share an identical representation space.
+    The hooked output is the ICL transformer's (before its final LayerNorm).
+    Not label-honest: a context point's own label is in the context when its
+    embedding is computed. With X_query=None, only E_train is computed (E_query is None).
     """
     try:
         import torch
@@ -91,11 +94,12 @@ def extract_symmetric_embeddings(
         return E
 
     E_train = embed_as_query(X_train)
-    E_query = embed_as_query(X_query)
+    E_query = None if X_query is None else embed_as_query(X_query)
 
     if projection is not None:
         W = np.asarray(projection, np.float32)
         E_train = E_train @ W
-        E_query = E_query @ W
+        if E_query is not None:
+            E_query = E_query @ W
 
     return E_train, E_query

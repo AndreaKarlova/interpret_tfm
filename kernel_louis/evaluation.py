@@ -1,4 +1,5 @@
-"""Evaluation metrics for subpopulation shift, detection AUC, and interpretability."""
+"""Evaluation metrics for subpopulation shift, detection AUC, interpretability,
+and mean ± SE aggregation over seeds."""
 
 from typing import Dict, List, Tuple
 import numpy as np
@@ -66,3 +67,88 @@ def weight_perplexity(W: np.ndarray, eps: float = 1e-12) -> Tuple[np.ndarray, np
     ppl = np.exp(entropy)
     rel_ppl = ppl / float(W.shape[1])
     return ppl, rel_ppl
+
+
+def group_accuracy_metrics(
+    y_pred: np.ndarray,
+    y_true: np.ndarray,
+    groups: np.ndarray,
+    n_groups: int,
+    rho: float,
+) -> Dict[str, float]:
+    """Accuracy per group (group 0 = clean, 1..R = rare) plus summary metrics.
+
+    worst_group   : min accuracy over the n_groups groups
+    balanced_mean : mean of the group accuracies
+    context_mean  : (1 - rho) * acc_clean + rho * mean(acc_rare), rho = rare fraction
+    worst_cell    : min accuracy over (class, group) cells
+    """
+    correct = np.asarray(y_pred) == np.asarray(y_true)
+    groups = np.asarray(groups)
+    acc = [float(np.mean(correct[groups == k])) for k in range(n_groups)]
+    out = {f"acc_g{k}": acc[k] for k in range(n_groups)}
+    out["worst_group"] = min(acc)
+    out["balanced_mean"] = float(np.mean(acc))
+    out["context_mean"] = (1.0 - rho) * acc[0] + rho * float(np.mean(acc[1:]))
+    cells = []
+    for c in np.unique(y_true):
+        for k in range(n_groups):
+            in_cell = (np.asarray(y_true) == c) & (groups == k)
+            if in_cell.any():
+                cells.append(np.mean(correct[in_cell]))
+    out["worst_cell"] = float(min(cells))
+    return out
+
+
+def detection_auc(L: np.ndarray, positive: np.ndarray) -> float:
+    """ROC-AUC of score L for flagging the `positive` points (0.5 = no information)."""
+    positive = np.asarray(positive, dtype=bool)
+    if positive.all() or not positive.any():
+        return float("nan")
+    return float(roc_auc_score(positive, L))
+
+
+def tail_composition(
+    L: np.ndarray,
+    groups: np.ndarray,
+    tau: float,
+    n_groups: int,
+) -> Dict[str, float]:
+    """What the tail {L_i >= quantile_tau(L)} contains (MNIST-C Table B / paper Table D.2).
+
+    Returns tail size, precision (fraction rare), recall (fraction of rare selected)
+    and the number of selected points from each group.
+    """
+    groups = np.asarray(groups)
+    row = compute_tail_precision_recall(L, groups > 0, [tau])[0]
+    tail = np.asarray(L) >= np.quantile(L, tau)
+    for k in range(n_groups):
+        row[f"n_g{k}"] = int(np.sum(tail & (groups == k)))
+    return row
+
+
+def mean_and_se(df, group_cols: List[str], metric_cols: List[str]):
+    """Mean and standard error over seeds: one row per combination of group_cols.
+
+    Columns <metric>_mean and <metric>_se are added, plus n_seeds. SE = sd / sqrt(n).
+    """
+    grouped = df.groupby(group_cols, dropna=False)
+    out = grouped[metric_cols].mean().add_suffix("_mean")
+    se = grouped[metric_cols].std(ddof=1) / np.sqrt(grouped.size().to_numpy()[:, None])
+    out = out.join(se.add_suffix("_se"))
+    out["n_seeds"] = grouped["seed"].nunique()
+    return out.reset_index()
+
+
+def paired_differences(df, metric: str, baseline: str, match_cols: List[str], cond_cols: List[str]):
+    """Per-seed paired difference metric(condition) - metric(baseline), then mean ± SE.
+
+    The baseline row is the row with intervention == baseline that shares the
+    seed and every column in match_cols (e.g. predictor and score).
+    """
+    keys = ["seed"] + match_cols
+    base = df[df["intervention"] == baseline][keys + [metric]]
+    base = base.rename(columns={metric: "baseline_value"})
+    merged = df.merge(base, on=keys)
+    merged["diff"] = merged[metric] - merged["baseline_value"]
+    return mean_and_se(merged, match_cols + cond_cols, ["diff"])
