@@ -24,6 +24,12 @@ Launch the complete interactive benchmark with one click:
 7. **Label Noise & The Prediction Rule Dependency (Section 5.3, Table 3 & Table D.5):** Shows that kernel smoothers average away label noise (pruning gives no gain), whereas noise-sensitive consumers (1-NN) recover from $0.594 \to 0.729$.
 8. **Censored Responses as an Analytical Stress Test (Section 6 & Appendix E):** Implements closed-form cavity LOO for Tobit / censored GP likelihoods and demonstrates the **Surprisal Units Dilemma** (Eq. E.8), where raw mixed surprisal rankings flip solely based on time unit scaling.
 
+### MNIST-C rare-corruption notebook
+
+[`notebooks/kernel_icl_leave_one_out_mnist_corrupted.ipynb`](notebooks/kernel_icl_leave_one_out_mnist_corrupted.ipynb) adapts the Section 5 experiments (Tables 2–4, D.1–D.5) to MNIST-C. Each context has a few **rare but correctly labelled** corrupted digits, and the corruption is independent of the class. The notebook asks whether difficulty scores detect those digits, and whether upweighting, pruning or resampling them helps. It covers the kernel head, logistic regression, 1-NN (label noise) and TabICLv2.
+
+It is built for Colab: the first cell clones this repository and imports its helpers from `kernel_louis` (`mnist_c`, `cnn`, `predictors`, plus the multiclass score/head/metric functions). Push any changes before running it there.
+
 ---
 
 ## Installation
