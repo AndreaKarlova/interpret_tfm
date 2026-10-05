@@ -110,3 +110,18 @@ def test_calibrate_scale_follows_its_selection_rule(setup):
     means = {s: np.mean(v) for s, v in scores.items()}
     assert accuracy == pytest.approx(means[scale])
     assert accuracy >= max(means.values()) - 0.01
+
+
+def test_frozen_loo_proba_is_stable_for_sharp_kernels():
+    """loo_proba('frozen') must equal renormalising without the self-weight, also when it saturates."""
+    from kernel_louis.heads import kernel_head_proba
+    from kernel_louis.kernels import squared_distances as sq_np
+    X, y, _ = data(seed=3)
+    for gamma in [0.5, 500.0]:
+        pred = KernelICLPredictor(tiny_model(), X, y, gamma=gamma)
+        H = pred.head.embed(pred.E_train)[0].detach().numpy().astype(np.float64)
+        log_K = -gamma * sq_np(H, H)
+        np.fill_diagonal(log_K, -np.inf)
+        y_enc = pred.clf.y_encoder_.transform(y)
+        P, _ = kernel_head_proba(log_K, y_enc, pred.n_classes_)
+        np.testing.assert_allclose(pred.loo_proba("frozen"), P[np.arange(len(y)), y_enc], atol=1e-5)

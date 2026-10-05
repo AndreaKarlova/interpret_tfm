@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from tabicl import TabICLClassifier
-from tabicl._model.kernel_head import KernelHead
+from tabicl._model.kernel_head import KernelHead, squared_distances
 from tabicl._model.tabicl import TabICL
 
 __all__ = ["KernelICL", "KernelICLPredictor", "load_kernelicl"]
@@ -284,6 +284,19 @@ class KernelICLPredictor:
                          num_classes=self.n_classes_, gamma=self.gamma)
         return w[0].cpu().numpy()
 
+    @torch.no_grad()
+    def _context_weights_without_self(self) -> np.ndarray:
+        """Context-on-context kernel weights (n, n) renormalised without the diagonal, computed
+        from logits with the self-affinity set to -inf, so they stay exact for sharp kernels."""
+        g = self.gamma if self.gamma is not None else self.head.gamma
+        H = self.head.embed(self.E_train)[0]
+        if self.head.kernel == "dot":
+            logits = g * (H @ H.T)
+        else:
+            logits = -g * squared_distances(H[None], H[None])[0]
+        logits.fill_diagonal_(float("-inf"))
+        return torch.softmax(logits.double(), dim=-1).cpu().numpy()
+
     def loo_proba(self, mode: str = "frozen") -> np.ndarray:
         """Probability each context row's own label gets when it is left out, (n,).
 
@@ -308,12 +321,16 @@ class KernelICLPredictor:
                 saved, self.gamma = self.gamma, k + 1
                 S = self.context_gram()
                 self.gamma = saved
-            else:
-                S = self.context_gram()
-            np.fill_diagonal(S, 0.0)
-            denom = S.sum(1)
+                np.fill_diagonal(S, 0.0)
+                denom = S.sum(1)
+                same = (y[:, None] == y[None, :])
+                return np.divide((S * same).sum(1), denom, out=np.zeros(n), where=denom > 0)
+            # Gaussian / dot kernels: exclude the self-affinity *before* normalising. Zeroing
+            # it after the softmax loses everything else once the self-weight rounds to 1,
+            # which happens with sharp kernels (the self-distance is 0).
+            S = self._context_weights_without_self()
             same = (y[:, None] == y[None, :])
-            return np.divide((S * same).sum(1), denom, out=np.zeros(n), where=denom > 0)
+            return (S * same).sum(1)
 
         if mode == "refit":
             p = np.zeros(n)

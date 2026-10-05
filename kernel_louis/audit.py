@@ -152,6 +152,9 @@ def frozen_deletion_effects(
     P (m, C) and W (m, n) are the full-context probabilities and kernel weights,
     y_ctx (n,) the encoded context labels, out_cls (m,) the audited class per query.
     Returns (len(rows), m), with rows = all context points by default.
+
+    Loses precision as w_i(x) -> 1 (division by 1 - w_i): with sharp kernels use
+    frozen_deletion_effects_log, which is exact from log-affinities.
     """
     rows = np.arange(W.shape[1]) if rows is None else np.asarray(rows)
     out_cls = np.asarray(out_cls)
@@ -168,6 +171,61 @@ def frozen_deletion_vectors(P: np.ndarray, W: np.ndarray, y_ctx: np.ndarray,
     w = W[:, rows].T[:, :, None]                                     # (r, m, 1)
     e = np.eye(n_classes)[np.asarray(y_ctx)[rows]][:, None, :]       # (r, 1, C)
     return w / np.clip(1.0 - w, eps, None) * (e - P[None, :, :])
+
+
+def frozen_deletion_proba_log(
+    log_K: np.ndarray,
+    y_ctx: np.ndarray,
+    n_classes: int,
+    rows: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    r"""Frozen-head predictions after deleting each context point, computed stably (paper Eq. 5).
+
+    p^fr_{D^-i|D}(c | x) = sum_{j != i, y_j = c} k_j(x) / sum_{j != i} k_j(x), from log-affinities
+    log_K (m, n). Unlike Eq. 8 written with weights, this never divides by 1 - w_i(x), so it stays
+    exact when one point carries (numerically) all of a query's weight. Each row is scaled by its
+    largest affinity; deleting any other point leaves a denominator >= 1, and deleting the largest
+    one is recomputed directly from the remaining points. Returns (len(rows), m, n_classes).
+    """
+    y = np.asarray(y_ctx, dtype=int)
+    m, n = log_K.shape
+    rows = np.arange(n) if rows is None else np.asarray(rows)
+    top = np.argmax(log_K, axis=1)
+    K = np.exp(log_K - log_K[np.arange(m), top][:, None])       # largest entry per row is 1
+    Y = np.eye(n_classes)[y]
+    A, Z = K @ Y, K.sum(axis=1)                                   # (m, C), (m,)
+    k = K[:, rows].T[:, :, None]                                  # (r, m, 1)
+    e = Y[rows][:, None, :]                                       # (r, 1, C)
+    with np.errstate(divide="ignore", invalid="ignore"):  # only the top point's entries can be 0/0;
+        out = (A[None] - k * e) / (Z[None, :, None] - k)   # they are recomputed below
+    for x in range(m):
+        hit = np.where(rows == top[x])[0]
+        if len(hit) > 0:
+            keep = np.arange(n) != top[x]
+            logits = log_K[x, keep]
+            w = np.exp(logits - logits.max())
+            out[hit[0], x] = (w @ Y[keep]) / w.sum()
+    return out
+
+
+def frozen_deletion_effects_log(log_K: np.ndarray, y_ctx: np.ndarray, out_cls: np.ndarray,
+                                n_classes: int, rows: Optional[np.ndarray] = None) -> np.ndarray:
+    """Stable frozen deletion effects I^head_i(x) on one coordinate: p_D(c_x | x) - p^fr_{D^-i|D}(c_x | x).
+
+    Same quantity as frozen_deletion_effects, without its loss of precision as w_i(x) -> 1.
+    Returns (len(rows), m).
+    """
+    out_cls = np.asarray(out_cls)
+    m = len(out_cls)
+    p_full = frozen_deletion_full(log_K, y_ctx, n_classes)[np.arange(m), out_cls]
+    p_del = frozen_deletion_proba_log(log_K, y_ctx, n_classes, rows)[:, np.arange(m), out_cls]
+    return p_full[None, :] - p_del
+
+
+def frozen_deletion_full(log_K: np.ndarray, y_ctx: np.ndarray, n_classes: int) -> np.ndarray:
+    """Full-context kernel-vote probabilities (m, C) from log-affinities, computed stably."""
+    K = np.exp(log_K - log_K.max(axis=1, keepdims=True))
+    return (K @ np.eye(n_classes)[np.asarray(y_ctx, dtype=int)]) / K.sum(axis=1, keepdims=True)
 
 
 def frozen_relabel_effects(W: np.ndarray, y_old: np.ndarray, y_new: np.ndarray,

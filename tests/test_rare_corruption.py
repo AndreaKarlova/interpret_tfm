@@ -369,3 +369,10 @@ def test_select_gamma_loo_maximises_brute_force_loo_likelihood():
         brute.append(ll / len(y))
     np.testing.assert_allclose(loo_ll, brute, atol=1e-9)
     assert best == gammas[int(np.argmax(brute))]
+
+
+def test_mean_and_se_ignores_missing_values_in_the_count():
+    df = pd.DataFrame({"seed": [0, 1, 2], "g": ["a"] * 3, "x": [1.0, 3.0, np.nan]})
+    row = mean_and_se(df, ["g"], ["x"]).iloc[0]
+    assert row.x_mean == pytest.approx(2.0)
+    assert row.x_se == pytest.approx(np.std([1.0, 3.0], ddof=1) / np.sqrt(2))

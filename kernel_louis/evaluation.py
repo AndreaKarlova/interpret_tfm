@@ -140,11 +140,12 @@ def tail_composition(
 def mean_and_se(df, group_cols: List[str], metric_cols: List[str]):
     """Mean and standard error over seeds: one row per combination of group_cols.
 
-    Columns <metric>_mean and <metric>_se are added, plus n_seeds. SE = sd / sqrt(n).
+    Columns <metric>_mean and <metric>_se are added, plus n_seeds. SE = sd / sqrt(n), with n the
+    number of non-missing values of that metric (a NaN for one seed must not shrink the SE).
     """
     grouped = df.groupby(group_cols, dropna=False)
     out = grouped[metric_cols].mean().add_suffix("_mean")
-    se = grouped[metric_cols].std(ddof=1) / np.sqrt(grouped.size().to_numpy()[:, None])
+    se = grouped[metric_cols].std(ddof=1) / np.sqrt(grouped[metric_cols].count())
     out = out.join(se.add_suffix("_se"))
     out["n_seeds"] = grouped["seed"].nunique()
     return out.reset_index()

@@ -244,3 +244,21 @@ def test_purity():
     assert purity(P, np.array([0, 0, 1, 1]), k=1) == 1.0
     assert purity(P, np.array([0, 1, 0, 1]), k=1) == 0.0
     assert purity(P, np.array([0, 0, 1, 0]), k=1, subset=np.array([True, True, False, False])) == 1.0
+
+
+def test_stable_frozen_deletion_survives_saturated_weights():
+    """With a sharp kernel one point holds (numerically) all the weight; the log-space formula stays exact."""
+    from kernel_louis.audit import frozen_deletion_effects_log, frozen_deletion_proba_log
+    rng = np.random.default_rng(5)
+    X, Xq = rng.normal(size=(40, 5)), rng.normal(size=(7, 5))
+    y, out_cls = rng.integers(0, 3, size=40), rng.integers(0, 3, size=7)
+    for gamma in [0.1, 3.0, 300.0]:
+        log_K = log_gaussian_kernel(Xq, X, gamma)
+        P, _ = kernel_head_proba(log_K, y, 3)
+        effects = frozen_deletion_effects_log(log_K, y, out_cls, 3)
+        vectors = frozen_deletion_proba_log(log_K, y, 3)
+        for i in range(40):
+            keep = np.arange(40) != i
+            P_del, _ = kernel_head_proba(log_K[:, keep], y[keep], 3)
+            np.testing.assert_allclose(vectors[i], P_del, atol=1e-10)
+            np.testing.assert_allclose(effects[i], P[np.arange(7), out_cls] - P_del[np.arange(7), out_cls], atol=1e-10)
