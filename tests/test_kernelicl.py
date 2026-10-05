@@ -16,7 +16,7 @@ for path in (os.path.join(REPO, "src"), os.path.join(REPO, "kernelicl")):
 from tabicl._model.kernel_head import KernelHead  # noqa: E402
 from tabicl._model.tabicl import TabICL  # noqa: E402
 from kernelicl_diagnostics import KernelICL, KernelICLPredictor  # noqa: E402
-from kernelicl_clinical import _make_folds, calibrate_scale, fold_embeddings  # noqa: E402
+from kernelicl_clinical import _make_folds, calibrate_scale, fold_embeddings, scale_curve  # noqa: E402
 from kernel_louis.heads import kernel_head_proba  # noqa: E402
 from kernel_louis.kernels import squared_distances  # noqa: E402
 
@@ -110,6 +110,28 @@ def test_calibrate_scale_follows_its_selection_rule(setup):
     means = {s: np.mean(v) for s, v in scores.items()}
     assert accuracy == pytest.approx(means[scale])
     assert accuracy >= max(means.values()) - 0.01
+
+
+def test_scale_curve_matches_calibrate_scale_and_direct_head(setup):
+    pred, X, y, Xq = setup
+    folds = _make_folds(y, 3, 0.2, 0)
+    fold_data = fold_embeddings(pred._fit, X, y, folds)
+    grid = [0.05, 0.5, 5.0]
+    curve = scale_curve(pred.head, fold_data, grid)
+    _, _, _, scores = calibrate_scale(pred.head, fold_data, grid, 0.01)
+    np.testing.assert_allclose(curve.accuracy, [np.mean(scores[s]) for s in grid])
+    # log-likelihood and effective neighbours of the first fold at the first scale, by hand
+    f = fold_data[0]
+    with torch.no_grad():
+        probs, w = pred.head(f["E_train"], f["E_val"], f["y_ctx"], num_classes=f["clf"].n_classes_, gamma=grid[0])
+    y_val = f["clf"].y_encoder_.transform(f["y_val"])
+    p_true = probs[0].double().numpy()[np.arange(len(y_val)), y_val]
+    single = scale_curve(pred.head, fold_data[:1], grid[:1]).iloc[0]
+    assert single.loglik == pytest.approx(np.log(p_true).mean(), abs=1e-9)
+    w = w[0].double().numpy()
+    assert single.effective_neighbours == pytest.approx(
+        np.median(np.exp(-np.sum(w * np.log(np.clip(w, 1e-12, 1)), axis=1))), rel=1e-9)
+    assert (curve.effective_neighbours.diff().dropna() <= 1e-9).all()   # sharper kernel, fewer neighbours
 
 
 def test_frozen_loo_proba_is_stable_for_sharp_kernels():

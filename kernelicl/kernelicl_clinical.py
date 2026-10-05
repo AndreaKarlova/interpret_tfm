@@ -19,7 +19,7 @@ import torch
 from tabicl import TabICLClassifier
 from tabicl._model.kernel_head import KernelHead, relative_perplexity, squared_distances
 
-__all__ = ["ClinicalExplainer", "calibrate_scale", "fit_explainer", "fold_embeddings"]
+__all__ = ["ClinicalExplainer", "calibrate_scale", "fit_explainer", "fold_embeddings", "scale_curve"]
 
 # Wider at the top end than the paper's Table 7: an untrained projection leaves the
 # embeddings on a scale where the useful region sits higher.
@@ -130,6 +130,33 @@ def calibrate_scale(head, fold_data: list[dict], grid, accuracy_tolerance: float
     candidates = [r for r in rows if r[1] >= best - accuracy_tolerance]
     scale, accuracy, perplexity = min(candidates, key=lambda r: r[2])
     return scale, accuracy, perplexity, scores
+
+
+def scale_curve(head, fold_data: list[dict], grid) -> pd.DataFrame:
+    """Held-out behaviour of the kernel head at each scale, averaged over folds.
+
+    One row per scale: ``accuracy``, ``loglik`` (mean log-probability of the true
+    label, clipped at 1e-12) and ``effective_neighbours`` (median weight perplexity
+    over the validation queries). ``calibrate_scale``'s sparsest-within-tolerance rule
+    runs to the sharpest scale when accuracy is flat; the log-likelihood does not,
+    because an overconfident near-1-NN head is penalised for its wrong answers.
+    """
+    rows = {scale: {"accuracy": [], "loglik": [], "effective_neighbours": []} for scale in grid}
+    for f in fold_data:
+        cal = f["clf"]
+        y_val = cal.y_encoder_.transform(f["y_val"])
+        for scale in grid:
+            with torch.no_grad():
+                probs, w = head(f["E_train"], f["E_val"], f["y_ctx"],
+                                num_classes=cal.n_classes_, gamma=scale)
+            p = probs[0].double().cpu().numpy()
+            w = w[0].double().cpu().numpy()
+            entropy = -np.sum(w * np.log(np.clip(w, 1e-12, 1.0)), axis=1)
+            rows[scale]["accuracy"].append(float((p.argmax(1) == y_val).mean()))
+            rows[scale]["loglik"].append(float(np.log(np.clip(p[np.arange(len(y_val)), y_val], 1e-12, 1.0)).mean()))
+            rows[scale]["effective_neighbours"].append(float(np.median(np.exp(entropy))))
+    return pd.DataFrame([{"gamma": scale, **{k: float(np.mean(v)) for k, v in r.items()}}
+                         for scale, r in rows.items()])
 
 
 def _make_clf(device, norm_method: str, random_state: int) -> TabICLClassifier:

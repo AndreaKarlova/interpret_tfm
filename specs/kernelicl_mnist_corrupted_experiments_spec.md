@@ -48,7 +48,7 @@ Out of scope everywhere:
 | Fine-tuning on MNIST-C | none (option (a)) |
 | Forward | `model.forward_kernel(X, y_train, gamma=γ)` from the repo's `src/tabicl` fork returns class probabilities and weights `w[b, j, i]`. Embeddings `h = W·E` (512-d) are read for context and queries. |
 | Ensembling / shuffling | none: one forward pass, fixed feature and row order |
-| Bandwidth γ | Per seed, the KernelICL paper's protocol, as implemented in `kernelicl_clinical.fit_explainer`: stratified 5-fold cross-validation on the context, each fold **re-embedded** with its validation rows as label-free queries; pick the sparsest scale (lowest weight perplexity) within 0.01 of the best fold accuracy. Fixed for every edit of that seed. **Not** frozen-LOO likelihood on the context embeddings: that criterion uses the label-leaking quantity behind the 0.008 collapse. |
+| Bandwidth γ | The checkpoint's own trained head γ (`GAMMA_SOURCE = "trained"`), fixed for every edit of that seed: the audits explain the model as trained. Reported next to a held-out curve per seed (accuracy, log-likelihood and effective neighbours per γ; stratified 5-fold, each fold **re-embedded** with its validation rows as label-free queries; `kernelicl_clinical.scale_curve`). Backup: best held-out log-likelihood (`"loglik"`). **Revised after the first full run:** the KernelICL paper's clinical rule (sparsest scale within 0.01 of the best fold accuracy) chose γ = 10, the top of the grid, for nearly every seed. Accuracy is flat in γ, so the rule runs to a 1-NN head, on which the frozen deletion audit is trivial (relative RMS ≈ 1, sign agreement ≈ 0.5). The rule is kept as the optional `"sparsest"`. **Not** frozen-LOO likelihood on the context embeddings: that criterion uses the label-leaking quantity behind the 0.008 collapse. |
 | Preprocessing | Two layers, both fitted once per seed on the full context and **reused unchanged for every edited context** (paper §4.2: matched preprocessing): (1) our standardise + PCA; (2) TabICL's own preprocessing (`CustomStandardScaler`, `OutlierRemover`, `UniqueFeatureFilter`, fitted inside `TabICLClassifier.fit` even with `norm_method="none"`). The model's column embedding still sees the edited context; that is the representation change being measured. Note: `kernelicl_diagnostics.loo_proba(mode="refit")` refits layer (2) for every deletion, so it is **not** used for the audits (see §7). |
 
 The checkpoint was fine-tuned on contexts of ≤ 1,024 rows and ≤ 100 features. That sets the sizes below.
@@ -160,7 +160,7 @@ Sign convention: effects here are **after minus before** (paper App. C.3/C.4), u
 ### Section 6. GP head on KernelICL embeddings (App. A.6; option (c))
 - GP regression on one-hot labels (10 outputs), Gaussian covariance on the 512-d KernelICL embeddings.
 - **Regression, not a GP classifier:** regression has exact leave-one-out and frozen-deletion formulas. A classifier needs an approximation (Laplace / EP), which would mix approximation error into the audit (the paper's warning in §6 / Eq. E.6). Outputs are not calibrated probabilities: accuracy uses the argmax; the audit uses the true-class output.
-- γ_GP and σ² chosen per context by **cross-validated held-out log-likelihood**, on the same 5 re-embedded folds used for γ (no extra passes); grid γ_GP ∈ `kernelicl_clinical.GAMMA_GRID` × σ² ∈ {0.01, 0.1, 1}. Backbone and W frozen. Not GP leave-one-out (Eq. A.20) on the context embeddings: those encode their own labels, and paper App. A.6 warns that the conditional identities then do not give genuine held-out prediction.
+- γ_GP and σ² chosen per context by **cross-validated held-out log-likelihood**, on the same 5 re-embedded folds as the γ curve (no extra passes); grid γ_GP ∈ 13 values from 0.1 to 1000 × 1 / (median squared embedding distance) × σ² ∈ {10⁻⁴, 10⁻³, 0.01, 0.1, 1} (the lower σ² values were added after σ² = 0.01, then the grid edge, won for every seed). Backbone and W frozen. Not GP leave-one-out (Eq. A.20) on the context embeddings: those encode their own labels, and paper App. A.6 warns that the conditional identities then do not give genuine held-out prediction.
 - **6.1 Prediction:** per-group accuracy of the GP head (argmax of the posterior mean) vs the kernel vote on the same embeddings.
 - **6.2 GP deletion audit:**
   - frozen-covariance deletion per class, $\mu^{-i}(x) = \mu(x) - (g_x^\top Q_{:,i})\,\alpha_i / Q_{ii}$, vs recomputed embeddings with the same γ_GP, σ²;
@@ -177,6 +177,7 @@ Sign convention: effects here are **after minus before** (paper App. C.3/C.4), u
 5. Determinism and row-order invariance (or the measured noise floor, see 0.7).
 6. Fixed-feature control row: $E_i = 0$.
 7. Baseline gap (warn).
+8. Head not near 1-NN: median effective neighbours ≥ 3 (warn).
 
 ### Section 8. Decisions
 Every default in this spec's §6 (Declared defaults), any added figures, and every deviation found while running.
@@ -216,7 +217,7 @@ Six figures, in total. Everything else is reported as tables. Each figure gets i
 | Context / features | 1,000 rows (ρ = 0.06), PCA 64; one labelled n = 2,000 point in the 3.4 sweep | inside the fine-tuning range (≤ 1,024 rows, ≤ 100 features), so audit errors are not out-of-range effects; the 2,000 point checks that the smaller contexts hide no trend |
 | Rare corruptions | `translate`, `stripe`, `canny_edges` | comparability with the existing run |
 | Fine-tuning on MNIST-C | none | no training on evaluation labels |
-| γ (KernelICL) | 5-fold re-embedded cross-validation per seed (`kernelicl_clinical` protocol), then fixed | label-honest; matches the KernelICL paper; §4.2: kernel parameters fixed |
+| γ (KernelICL) | the checkpoint's trained γ, with the re-embedded held-out curve reported; fixed | explains the model as trained; the accuracy-based clinical rule gave 1-NN heads; §4.2: kernel parameters fixed |
 | γ (fixed-feature control row) | frozen-LOO likelihood (`kernel_louis.loo.select_gamma_loo`) | fixed features carry no labels, so frozen LOO is honest there; same rule as the existing notebooks |
 | Preprocessing | ours and TabICL's fitted once per seed, reused for edited contexts; end-to-end refit only as a labelled extra row | paper §4.2 |
 | Audited output | true-class probability; TV size secondary | the true-class probability is signed, so Bias and sign agreement are defined; TV is always ≥ 0 and only measures size (paper §4.2: multiclass audits must declare one) |
