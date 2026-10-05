@@ -162,3 +162,21 @@ def paired_differences(df, metric: str, baseline: str, match_cols: List[str], co
     merged = df.merge(base, on=keys)
     merged["diff"] = merged[metric] - merged["baseline_value"]
     return mean_and_se(merged, match_cols + cond_cols, ["diff"])
+
+
+def purity(P: np.ndarray, labels: np.ndarray, k: int, subset: Optional[np.ndarray] = None) -> float:
+    """Fraction of each point's k nearest neighbours (Euclidean, in P) sharing its label.
+
+    Neighbours are searched among all points; with ``subset`` (a boolean mask), the
+    fraction is averaged over those points only (e.g. one group).
+    Moved here from kernelicl/kernelicl_embeddings.py so notebooks can import it.
+    Measure it on label-free (query) embeddings: context embeddings contain their own
+    labels, so their purity reflects label leakage, not representation quality.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    labels = np.asarray(labels)
+    idx = NearestNeighbors(n_neighbors=k + 1).fit(P).kneighbors(P, return_distance=False)[:, 1:]
+    same = labels[idx] == labels[:, None]
+    if subset is not None:
+        same = same[np.asarray(subset, dtype=bool)]
+    return float(same.mean())

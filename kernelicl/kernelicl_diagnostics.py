@@ -205,6 +205,66 @@ class KernelICLPredictor:
     def weights(self, X) -> np.ndarray:
         return self.predict_proba_and_weights(X)[1]
 
+    # -- matched edited contexts ------------------------------------------- #
+    def processed(self, X_query):
+        """Rows after this predictor's fitted TabICL preprocessing.
+
+        Returns (context rows (n, H), query rows (m, H), encoded context labels (n,)),
+        as tensors on the model's device. Edited contexts are built from these rows,
+        so they reuse the preprocessing fitted on the full context (paper §4.2).
+        """
+        X_t, y_t = self._tensors(self.clf, X_query)
+        n = len(self.y_ctx)
+        return X_t[0, :n], X_t[0, n:], y_t[0]
+
+    @torch.no_grad()
+    def embed_rows(self, ctx_rows, ctx_labels, query_rows):
+        """Symmetric embeddings for a batch of already-preprocessed contexts.
+
+        ctx_rows (B, k, H), ctx_labels (B, k) encoded, query_rows (B, m, H).
+        Returns E_train (B, k, d) and E_test (B, m, d), before the projection W.
+        """
+        model, cfg = self.clf.model_, self.clf.inference_config_
+        X_t = torch.cat([ctx_rows, query_rows], dim=1)
+        R = model.row_interactor(
+            model.col_embedder(X_t, y_train=ctx_labels, mgr_config=cfg.COL_CONFIG),
+            mgr_config=cfg.ROW_CONFIG,
+        )
+        return model.icl_predictor.embed(R, ctx_labels, symmetric=True)
+
+    @torch.no_grad()
+    def edited_passes(self, contexts, batch_size: int = 8, return_embeddings: bool = False):
+        """Matched recomputation for a list of edited contexts.
+
+        Each context is a dict with ``rows`` (k, H) preprocessed context rows,
+        ``labels`` (k,) encoded labels and ``queries`` (m, H) preprocessed query rows,
+        typically built from :meth:`processed`. Nothing is refitted: unlike
+        ``loo_proba(mode="refit")``, TabICL's preprocessing stays the one fitted on the
+        full context. Contexts with equal (k, m) are run together, ``batch_size`` at a time.
+
+        Yields (indices, probs (B, m, C)) per batch, or (indices, probs, E_train, E_test)
+        with ``return_embeddings=True``. Embeddings are unprojected; use ``self.head.embed``.
+        """
+        start = 0
+        while start < len(contexts):
+            k, m = len(contexts[start]["labels"]), len(contexts[start]["queries"])
+            stop = start
+            while (stop < len(contexts) and stop - start < batch_size
+                   and len(contexts[stop]["labels"]) == k and len(contexts[stop]["queries"]) == m):
+                stop += 1
+            batch = contexts[start:stop]
+            rows = torch.stack([c["rows"] for c in batch])
+            labels = torch.stack([c["labels"] for c in batch]).float()
+            queries = torch.stack([c["queries"] for c in batch])
+            E_train, E_test = self.embed_rows(rows, labels, queries)
+            probs, _ = self.head(E_train, E_test, labels, num_classes=self.n_classes_, gamma=self.gamma)
+            indices = list(range(start, stop))
+            if return_embeddings:
+                yield indices, probs.cpu().numpy(), E_train, E_test
+            else:
+                yield indices, probs.cpu().numpy()
+            start = stop
+
     # -- leave-one-out ------------------------------------------------------ #
     @property
     def E_train(self) -> torch.Tensor:

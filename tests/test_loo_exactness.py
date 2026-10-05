@@ -136,3 +136,111 @@ def test_context_admission_audit_exactness():
     assert metrics["sign_agreement"] == 1.0
     assert metrics["top_k_overlap"] == 1.0
 
+
+
+# ---------------------------------------------------------------- KernelICL audit formulas
+
+
+from kernel_louis.heads import kernel_head_proba
+from kernel_louis.kernels import log_gaussian_kernel
+from kernel_louis.audit import (
+    frozen_admission_effects,
+    frozen_deletion_effects,
+    frozen_deletion_vectors,
+    frozen_relabel_effects,
+)
+from kernel_louis.loo import (
+    gp_frozen_deletion_effects,
+    gp_heldout_loglik,
+    gp_loo_precision,
+    select_gp_hyperparameters_cv,
+)
+from kernel_louis.evaluation import purity
+
+
+def multiclass_problem(seed=0, n=30, m=8, C=4, d=3):
+    rng = np.random.default_rng(seed)
+    X, Xq = rng.normal(size=(n, d)), rng.normal(size=(m, d))
+    return X, Xq, rng.integers(0, C, size=n), rng.integers(0, C, size=m), C
+
+
+def test_frozen_deletion_effects_match_brute_force():
+    X, Xq, y, out_cls, C = multiclass_problem()
+    log_K = log_gaussian_kernel(Xq, X, 0.5)
+    P, _, W = kernel_head_proba(log_K, y, C, return_weights=True)
+    I_head = frozen_deletion_effects(P, W, y, out_cls)
+    V = frozen_deletion_vectors(P, W, y, np.arange(len(y)))
+    for i in range(len(y)):
+        keep = np.arange(len(y)) != i
+        P_del, _ = kernel_head_proba(log_K[:, keep], y[keep], C)
+        np.testing.assert_allclose(I_head[i], P[np.arange(len(Xq)), out_cls] - P_del[np.arange(len(Xq)), out_cls], atol=1e-12)
+        np.testing.assert_allclose(V[i], P - P_del, atol=1e-12)
+
+
+def test_frozen_relabel_and_admission_effects_match_brute_force():
+    X, Xq, y, out_cls, C = multiclass_problem(seed=1)
+    log_K = log_gaussian_kernel(Xq, X, 0.5)
+    P, _, W = kernel_head_proba(log_K, y, C, return_weights=True)
+    rows = np.array([0, 3, 7])
+    y_new = (y[rows] + 1) % C
+    effects = frozen_relabel_effects(W, y[rows], y_new, out_cls, rows)
+    for r, i in enumerate(rows):
+        y_edit = y.copy()
+        y_edit[i] = y_new[r]
+        P_new, _ = kernel_head_proba(log_K, y_edit, C)
+        np.testing.assert_allclose(effects[r], P_new[np.arange(len(Xq)), out_cls] - P[np.arange(len(Xq)), out_cls], atol=1e-12)
+    Z = np.random.default_rng(2).normal(size=(4, 3))
+    v = np.array([0, 1, 2, 3])
+    log_k_z = log_gaussian_kernel(Z, Xq, 0.5)                    # (n_cand, m)
+    log_Z = np.logaddexp.reduce(log_K, axis=1)
+    effects = frozen_admission_effects(log_k_z, log_Z, P, v, out_cls)
+    for c in range(len(Z)):
+        P_new, _ = kernel_head_proba(np.column_stack([log_K, log_k_z[c]]), np.append(y, v[c]), C)
+        np.testing.assert_allclose(effects[c], P_new[np.arange(len(Xq)), out_cls] - P[np.arange(len(Xq)), out_cls], atol=1e-12)
+
+
+def test_audit_metrics_follow_appendix_c3():
+    actual = np.array([[0.5, 0.0], [-0.2, 0.0], [1e-6, 0.3]])
+    head = np.array([[0.4, 0.9], [0.1, -0.9], [-0.1, 0.2]])
+    m = compute_audit_metrics(actual, head, tol=1e-3, top_k=1)
+    # only |actual| > tol counts for signs: entries 0.5 (agree), -0.2 (disagree), 0.3 (agree)
+    assert m["sign_agreement"] == pytest.approx(2 / 3)
+    # per query: query 0 top point 0 in both; query 1 top actual = point 2, top head = point 0 (tie by index)
+    assert m["top_k_overlap"] == pytest.approx(0.5)
+    assert m["relative_rms"] == pytest.approx(m["rms"] / m["rms_actual"])
+
+
+def test_gp_frozen_deletion_matches_brute_force_refit():
+    rng = np.random.default_rng(3)
+    X, Xq = rng.normal(size=(25, 3)), rng.normal(size=(6, 3))
+    Y = np.eye(3)[rng.integers(0, 3, size=25)]
+    out_cls = rng.integers(0, 3, size=6)
+    K, K_q = gaussian_kernel(X, X, 0.4), gaussian_kernel(Xq, X, 0.4)
+    Q = gp_loo_precision(K, 0.1)
+    effects = gp_frozen_deletion_effects(K_q, Q, Q @ Y, out_cls)
+    mu, _ = gp_predict(K_q, K, Y, sigma2=0.1)
+    for i in range(25):
+        keep = np.arange(25) != i
+        mu_del, _ = gp_predict(K_q[:, keep], K[np.ix_(keep, keep)], Y[keep], sigma2=0.1)
+        np.testing.assert_allclose(effects[i], mu[np.arange(6), out_cls] - mu_del[np.arange(6), out_cls], atol=1e-8)
+
+
+def test_select_gp_hyperparameters_cv_returns_table_argmax():
+    rng = np.random.default_rng(4)
+    H = rng.normal(size=(60, 3))
+    Y = np.eye(2)[(H[:, 0] > 0).astype(int)]
+    folds = [(H[:40], H[40:], Y[:40], Y[40:]), (H[20:], H[:20], Y[20:], Y[:20])]
+    gammas, sigma2s = np.array([0.01, 0.3, 3.0]), np.array([0.01, 0.1, 1.0])
+    gamma, sigma2, table = select_gp_hyperparameters_cv(folds, gammas, sigma2s)
+    a, b = np.unravel_index(np.argmax(table), table.shape)
+    assert (gamma, sigma2) == (gammas[a], sigma2s[b])
+    direct = gp_heldout_loglik(gaussian_kernel(H[40:], H[:40], 0.3), gaussian_kernel(H[:40], H[:40], 0.3), Y[:40], Y[40:], 0.1)
+    direct += gp_heldout_loglik(gaussian_kernel(H[:20], H[20:], 0.3), gaussian_kernel(H[20:], H[20:], 0.3), Y[20:], Y[:20], 0.1)
+    assert table[1, 1] == pytest.approx(direct / 2)
+
+
+def test_purity():
+    P = np.array([[0.0], [0.1], [5.0], [5.1]])
+    assert purity(P, np.array([0, 0, 1, 1]), k=1) == 1.0
+    assert purity(P, np.array([0, 1, 0, 1]), k=1) == 0.0
+    assert purity(P, np.array([0, 0, 1, 0]), k=1, subset=np.array([True, True, False, False])) == 1.0

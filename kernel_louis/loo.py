@@ -24,6 +24,9 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold
+
+from kernel_louis.heads import gp_predict
+from kernel_louis.kernels import squared_distances
 from threadpoolctl import threadpool_limits
 
 
@@ -227,6 +230,57 @@ def gp_loo_score_multiclass(
     v = 1.0 / d
     nll = 0.5 * np.log(2.0 * np.pi * v)[:, None] + 0.5 * (Y - mu) ** 2 / v[:, None]
     return nll.mean(axis=1)
+
+
+def gp_frozen_deletion_effects(
+    K_q: np.ndarray,
+    Q: np.ndarray,
+    alpha: np.ndarray,
+    out_cls: np.ndarray,
+    rows: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Frozen-covariance GP deletion effects on one output coordinate (paper App. A.6).
+
+    With Q = (K + sigma2 I)^-1 and alpha = Q Y fixed, removing context point i changes
+    the posterior mean at x by mu(x) - mu^{-i}(x) = (k_x^T Q[:, i]) alpha[i, c] / Q_ii.
+    K_q (m, n) query-context covariance, out_cls (m,) the audited class per query.
+    Returns (len(rows), m): effects before minus after, like deletion influence (Eq. 2).
+    """
+    rows = np.arange(Q.shape[0]) if rows is None else np.asarray(rows)
+    B = K_q @ Q[:, rows]                                    # (m, r)
+    a = alpha[rows][:, np.asarray(out_cls)]                 # (r, m)
+    return B.T * a / np.diag(Q)[rows][:, None]
+
+
+def gp_heldout_loglik(K_val_tr, K_tr, Y_tr, Y_val, sigma2: float) -> float:
+    """Mean held-out Gaussian log-likelihood of one-hot targets under GP regression.
+
+    Uses the predictive mean and the predictive variance of a new noisy observation
+    (latent variance from gp_predict + sigma2), averaged over points and classes.
+    """
+    mu, v_latent = gp_predict(K_val_tr, K_tr, Y_tr, sigma2=sigma2)
+    var = (v_latent + sigma2)[:, None]
+    return float(np.mean(-0.5 * np.log(2.0 * np.pi * var) - 0.5 * (Y_val - mu) ** 2 / var))
+
+
+def select_gp_hyperparameters_cv(folds, gammas, sigma2s) -> Tuple[float, float, np.ndarray]:
+    """GP kernel scale and noise by cross-validated held-out log-likelihood.
+
+    folds: list of (H_tr, H_val, Y_tr, Y_val) with H the (projected) embeddings of each
+    fold's context and of its label-free validation queries, Y one-hot. Choosing on
+    held-out queries avoids the label leak of context embeddings (paper App. A.6 caveat).
+    Returns (gamma, sigma2, table (len(gammas), len(sigma2s)) of mean log-likelihoods).
+    """
+    table = np.zeros((len(gammas), len(sigma2s)))
+    for H_tr, H_val, Y_tr, Y_val in folds:
+        D_tr = squared_distances(H_tr, H_tr)
+        D_val = squared_distances(H_val, H_tr)
+        for a, gamma in enumerate(gammas):
+            K_tr, K_val = np.exp(-gamma * D_tr), np.exp(-gamma * D_val)
+            for b, sigma2 in enumerate(sigma2s):
+                table[a, b] += gp_heldout_loglik(K_val, K_tr, Y_tr, Y_val, sigma2) / len(folds)
+    a, b = np.unravel_index(np.argmax(table), table.shape)
+    return float(gammas[a]), float(sigma2s[b]), table
 
 
 def true_class_proba(proba: np.ndarray, classes: np.ndarray, y: np.ndarray) -> np.ndarray:

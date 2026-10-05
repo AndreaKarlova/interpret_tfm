@@ -19,7 +19,7 @@ import torch
 from tabicl import TabICLClassifier
 from tabicl._model.kernel_head import KernelHead, relative_perplexity, squared_distances
 
-__all__ = ["ClinicalExplainer", "fit_explainer"]
+__all__ = ["ClinicalExplainer", "calibrate_scale", "fit_explainer", "fold_embeddings"]
 
 # Wider at the top end than the paper's Table 7: an untrained projection leaves the
 # embeddings on a scale where the useful region sits higher.
@@ -82,6 +82,54 @@ def _make_folds(y, n_folds: int, val_size: float, random_state: int):
     strat = y if counts.min() >= 2 else None
     return [train_test_split(np.arange(n), test_size=val_size,
                              random_state=random_state, stratify=strat)]
+
+
+def fold_embeddings(fit_clf, X, y, folds, say=None) -> list[dict]:
+    """One re-embedded pass per fold, for label-honest calibration.
+
+    The fold's training rows are the context and its validation rows are label-free
+    queries, so no validation embedding has seen its own label. Returns one dict per
+    fold: the fitted classifier ``clf``, unprojected embeddings ``E_train`` (1, n, d)
+    and ``E_val`` (1, m, d), encoded context labels ``y_ctx`` (1, n) and raw ``y_val``.
+    """
+    y = _as_array(y)
+    out = []
+    for i, (tr_idx, va_idx) in enumerate(folds, 1):
+        cal = fit_clf(_take(X, tr_idx), y[tr_idx])
+        E_train, E_val = _embed(cal, _take(X, va_idx))
+        y_ctx = torch.from_numpy(cal.y_encoder_.transform(y[tr_idx])).float().to(E_train.device)[None]
+        out.append(dict(clf=cal, E_train=E_train, E_val=E_val, y_ctx=y_ctx, y_val=y[va_idx]))
+        if say is not None:
+            say(f"  fold {i}/{len(folds)} done")
+    return out
+
+
+def calibrate_scale(head, fold_data: list[dict], grid, accuracy_tolerance: float = 0.01):
+    """Kernel scale by cross-validated accuracy over ``fold_embeddings`` output.
+
+    Accuracy is near-flat across much of the grid while the evidence base varies by
+    orders of magnitude, so a plain argmax returns a kernel that averages over
+    everything: among scales within ``accuracy_tolerance`` of the best mean fold
+    accuracy, the sparsest (lowest mean relative perplexity) is chosen.
+    Returns (scale, accuracy, perplexity, scores), scores mapping scale -> fold accuracies.
+    """
+    scores = {scale: [] for scale in grid}
+    perplexities = {scale: [] for scale in grid}
+    for f in fold_data:
+        cal = f["clf"]
+        for scale in grid:
+            with torch.no_grad():
+                probs, w = head(f["E_train"], f["E_val"], f["y_ctx"],
+                                num_classes=cal.n_classes_, gamma=scale)
+            pred = cal.y_encoder_.inverse_transform(probs.argmax(-1)[0].cpu().numpy())
+            scores[scale].append(float((pred == f["y_val"]).mean()))
+            perplexities[scale].append(float(relative_perplexity(w).mean()))
+    rows = [(scale, float(np.mean(scores[scale])), float(np.mean(perplexities[scale])))
+            for scale in grid]
+    best = max(r[1] for r in rows)
+    candidates = [r for r in rows if r[1] >= best - accuracy_tolerance]
+    scale, accuracy, perplexity = min(candidates, key=lambda r: r[2])
+    return scale, accuracy, perplexity, scores
 
 
 def _make_clf(device, norm_method: str, random_state: int) -> TabICLClassifier:
@@ -221,41 +269,14 @@ def fit_explainer(
         grid = K_GRID if kernel == "knn" else GAMMA_GRID
         folds = _make_folds(y_train, n_folds, val_size, random_state)
         say(f"calibrating over {len(folds)} fold(s), one embedding pass each...")
-
-        scores = {scale: [] for scale in grid}
-        perplexities = {scale: [] for scale in grid}
-        ref_chunks = []
-
-        for i, (tr_idx, va_idx) in enumerate(folds, 1):
-            cal = fit_clf(_take(X_train, tr_idx), y_train[tr_idx])
-            E_cal_train, E_cal_val = _embed(cal, _take(X_train, va_idx))
-            y_val = y_train[va_idx]
-            y_ctx = torch.from_numpy(
-                cal.y_encoder_.transform(y_train[tr_idx])).float().to(device)[None]
-            ref_chunks.append(
-                ClinicalExplainer.reference_distances_from(head, E_cal_train, E_cal_val))
-
-            # The scale never touches the embedding, so the whole grid is swept over
-            # one embedding per fold rather than one per (fold, scale).
-            if gamma is None:
-                for scale in grid:
-                    with torch.no_grad():
-                        probs, w = head(E_cal_train, E_cal_val, y_ctx,
-                                        num_classes=cal.n_classes_, gamma=scale)
-                    pred = cal.y_encoder_.inverse_transform(probs.argmax(-1)[0].cpu().numpy())
-                    scores[scale].append(float((pred == y_val).mean()))
-                    perplexities[scale].append(float(relative_perplexity(w).mean()))
-            say(f"  fold {i}/{len(folds)} done")
+        fold_data = fold_embeddings(fit_clf, X_train, y_train, folds, say=say)
+        ref_chunks = [ClinicalExplainer.reference_distances_from(head, f["E_train"], f["E_val"])
+                      for f in fold_data]
 
         if gamma is None:
-            rows = [(scale, float(np.mean(scores[scale])), float(np.mean(perplexities[scale])))
-                    for scale in grid]
-            # Accuracy is near-flat across much of the grid while the evidence base
-            # varies by orders of magnitude, so a plain argmax returns a kernel that
-            # averages over everything. Take the sparsest scale within tolerance.
-            best = max(r[1] for r in rows)
-            candidates = [r for r in rows if r[1] >= best - accuracy_tolerance]
-            gamma, accuracy, perplexity = min(candidates, key=lambda r: r[2])
+            gamma, accuracy, perplexity, scores = calibrate_scale(
+                head, fold_data, grid, accuracy_tolerance)
+            best = max(float(np.mean(v)) for v in scores.values())
             n_ctx = len(folds[0][0])
             say(f"  scale={gamma}  cross-validated accuracy={accuracy:.3f} "
                 f"(+/-{np.std(scores[gamma]):.3f} across folds; best on grid {best:.3f})")

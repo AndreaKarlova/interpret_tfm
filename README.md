@@ -34,6 +34,10 @@ It is built for Colab: the first cell clones this repository and imports its hel
 
 [`notebooks/kernel_icl_leave_one_out_waterbirds.ipynb`](notebooks/kernel_icl_leave_one_out_waterbirds.ipynb) runs the same sections and tables as the MNIST-C notebook on Waterbirds, where the rare groups (landbird on water, waterbird on land) fail because they break a **background shortcut** rather than because they are scarce. Features come from an ImageNet ResNet-50 (cached in Drive), the test set is the official test split, and the official validation split supplies the τ/λ selection set and a group-balanced reference context. Data helpers are in `kernel_louis/waterbirds.py`. The earlier experiment is kept as `notebooks/kernel_icl_leave_one_out_waterbirds_old.ipynb`.
 
+### KernelICL audit notebooks
+
+[`notebooks/kernelicl_waterbirds.ipynb`](notebooks/kernelicl_waterbirds.ipynb) and [`notebooks/kernelicl_mnist_corrupted.ipynb`](notebooks/kernelicl_mnist_corrupted.ipynb) run the paper's Section 4 audits on the fine-tuned KernelICL checkpoint (`paper.pt`). For every context edit the paper defines (deletion, label replacement, admission, head reweighting), they compare the frozen head explanation with rerunning the model on the edited context, plus a GP head on KernelICL embeddings. Specs: [`specs/`](specs/). They use the matched edited passes in `kernelicl/kernelicl_diagnostics.py` and the calibration in `kernelicl/kernelicl_clinical.py`.
+
 ---
 
 ## Installation

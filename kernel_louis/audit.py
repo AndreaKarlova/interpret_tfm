@@ -1,11 +1,15 @@
 r"""Context Influence Audit (Section 4, Eq. 8, Eq. 12, and Table 1).
 
+The fixed-kernel audits below recompute on the same kernel (E = 0 by construction:
+the negative control). The frozen_*_effects functions take measured weights and are
+compared with recomputed predictions from a context-dependent model such as KernelICL.
+
 Decomposes actual context modification effects into:
 1. Frozen-head effect (closed-form deletion / admission effect).
 2. Representation-mediated discrepancy (discarded by the frozen-embedding assumption).
 """
 
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 import numpy as np
 from kernel_louis.heads import self_normalized_predict
 
@@ -131,49 +135,113 @@ def audit_context_admission(
     }
 
 
+def frozen_deletion_effects(
+    P: np.ndarray,
+    W: np.ndarray,
+    y_ctx: np.ndarray,
+    out_cls: np.ndarray,
+    rows: Optional[np.ndarray] = None,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    r"""Frozen-head deletion effects I^head_i(x) on one output coordinate (paper Eq. 8).
+
+    I^head_i(x) = w_i(x) / (1 - w_i(x)) * ([y_i = c_x] - p_D(c_x | x)), the change in the
+    probability of class c_x = out_cls[x] when context point i is removed from the vote
+    and the remaining weights are renormalised, embeddings held fixed.
+
+    P (m, C) and W (m, n) are the full-context probabilities and kernel weights,
+    y_ctx (n,) the encoded context labels, out_cls (m,) the audited class per query.
+    Returns (len(rows), m), with rows = all context points by default.
+    """
+    rows = np.arange(W.shape[1]) if rows is None else np.asarray(rows)
+    out_cls = np.asarray(out_cls)
+    p_c = P[np.arange(len(out_cls)), out_cls]                       # (m,)
+    w = W[:, rows].T                                                 # (r, m)
+    hit = (np.asarray(y_ctx)[rows][:, None] == out_cls[None, :])     # (r, m)
+    return w / np.clip(1.0 - w, eps, None) * (hit - p_c[None, :])
+
+
+def frozen_deletion_vectors(P: np.ndarray, W: np.ndarray, y_ctx: np.ndarray,
+                            rows: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Eq. 8 for the whole probability vector: (len(rows), m, C), for size measures such as TV."""
+    n_classes = P.shape[1]
+    w = W[:, rows].T[:, :, None]                                     # (r, m, 1)
+    e = np.eye(n_classes)[np.asarray(y_ctx)[rows]][:, None, :]       # (r, 1, C)
+    return w / np.clip(1.0 - w, eps, None) * (e - P[None, :, :])
+
+
+def frozen_relabel_effects(W: np.ndarray, y_old: np.ndarray, y_new: np.ndarray,
+                           out_cls: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """Frozen label-replacement effects, after minus before (paper App. C.3).
+
+    Replacing y_i by v with the weights fixed changes the probability of class c by
+    w_i(x) ([v = c] - [y_i = c]). Returns (len(rows), m).
+    """
+    out_cls = np.asarray(out_cls)
+    new_hit = np.asarray(y_new)[:, None] == out_cls[None, :]
+    old_hit = np.asarray(y_old)[:, None] == out_cls[None, :]
+    return W[:, rows].T * (new_hit.astype(float) - old_hit)
+
+
+def frozen_admission_effects(log_k_z: np.ndarray, log_Z: np.ndarray, P: np.ndarray,
+                             v: np.ndarray, out_cls: np.ndarray) -> np.ndarray:
+    r"""Frozen admission effects a_z(x) ([v = c] - p_D(c | x)), after minus before (paper Eq. 11-12).
+
+    a_z(x) = k(x, z) / (Z_D(x) + k(x, z)), computed in log space: log_k_z (n_cand, m) are
+    log affinities between each candidate and each query, log_Z (m,) the log total
+    affinity of each query to the context. Returns (n_cand, m).
+    """
+    out_cls = np.asarray(out_cls)
+    a = np.exp(log_k_z - np.logaddexp(log_Z[None, :], log_k_z))
+    p_c = P[np.arange(len(out_cls)), out_cls]
+    hit = np.asarray(v)[:, None] == out_cls[None, :]
+    return a * (hit - p_c[None, :])
+
+
 def compute_audit_metrics(
     actual_influence: np.ndarray,
     head_influence: np.ndarray,
     tol: float = 1e-4,
     top_k: int = 5,
 ) -> Dict[str, float]:
-    r"""Compute Matched-Intervention Protocol metrics (Table 1 & Eq. 10).
+    r"""Audit metrics of paper Eq. 10, Table 1 and App. C.3.
 
-    Metrics:
-    - Signed error E_i = actual - head
-    - Bias = (1/|A|) \sum E_i
-    - RMS = \sqrt{(1/|A|) \sum E_i^2}
-    - Sign agreement = fraction where sign(actual) == sign(head) (with tol)
-    - Top-k overlap = Jaccard / fraction overlap of largest absolute influences
+    Inputs are the recomputed ("actual") and frozen-head effects, either (n_points,) for a
+    single query or (n_points, n_queries).
+
+    - bias, rms: mean and root-mean-square of E = actual - head (Eq. 10)
+    - rms_actual: RMS of the actual effects (the scale E is compared with); relative_rms = rms / rms_actual
+    - sign_agreement: fraction of entries with |actual| > tol whose signs agree
+      (only the *true* effect is thresholded, App. C.3)
+    - top_k_overlap: per query, overlap of the k context points with the largest
+      |actual| and |head| effects, averaged over queries (App. C.3)
     """
-    actual = np.asarray(actual_influence, dtype=float).ravel()
-    head = np.asarray(head_influence, dtype=float).ravel()
+    actual = np.asarray(actual_influence, dtype=float)
+    head = np.asarray(head_influence, dtype=float)
+    if actual.ndim == 1:
+        actual, head = actual[:, None], head[:, None]
 
     E = actual - head
     bias = float(np.mean(E))
     rms = float(np.sqrt(np.mean(E ** 2)))
+    rms_actual = float(np.sqrt(np.mean(actual ** 2)))
 
-    # Sign agreement on non-trivial effects
-    active = (np.abs(actual) > tol) | (np.abs(head) > tol)
-    if np.any(active):
-        sign_agree = float(np.mean(np.sign(actual[active]) == np.sign(head[active])))
-    else:
-        sign_agree = 1.0
+    active = np.abs(actual) > tol
+    sign_agree = float(np.mean(np.sign(actual[active]) == np.sign(head[active]))) if active.any() else float("nan")
 
-    # Top-k overlap
-    k = min(top_k, len(actual))
-    if k > 0:
-        idx_act: Set[int] = set(np.argsort(np.abs(actual))[-k:])
-        idx_head: Set[int] = set(np.argsort(np.abs(head))[-k:])
-        top_k_overlap = float(len(idx_act & idx_head) / k)
-    else:
-        top_k_overlap = 1.0
+    k = min(top_k, actual.shape[0])
+    overlaps = []
+    for q in range(actual.shape[1]):
+        top_actual = set(np.argsort(-np.abs(actual[:, q]), kind="stable")[:k])
+        top_head = set(np.argsort(-np.abs(head[:, q]), kind="stable")[:k])
+        overlaps.append(len(top_actual & top_head) / k)
 
     return {
         "bias": bias,
         "rms": rms,
+        "rms_actual": rms_actual,
+        "relative_rms": rms / rms_actual if rms_actual > 0 else float("nan"),
         "sign_agreement": sign_agree,
-        "top_k_overlap": top_k_overlap,
-        "max_abs_error": float(np.max(np.abs(E))) if len(E) > 0 else 0.0,
+        "top_k_overlap": float(np.mean(overlaps)) if overlaps else float("nan"),
+        "max_abs_error": float(np.max(np.abs(E))) if E.size else 0.0,
     }
-

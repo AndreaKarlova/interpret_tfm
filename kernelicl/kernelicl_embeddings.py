@@ -128,10 +128,7 @@ print(f"embedding {H_train.shape} | row stage {ROW_train.shape} | raw {RAW_train
 # Measured on TEST cases and in the FULL space. Train-side purity is 1.000 for any k
 # because a training row sits in its own context and reads its own label off its own
 # key; and purity computed on the 2-D projection would measure UMAP, not the model.
-def purity(P, labels, k: int) -> float:
-    """Fraction of each point's k nearest neighbours sharing its label."""
-    idx = NearestNeighbors(n_neighbors=k + 1).fit(P).kneighbors(P, return_distance=False)[:, 1:]
-    return float((labels[idx] == labels[:, None]).mean())
+from kernel_louis.evaluation import purity  # shared with the KernelICL audit notebooks
 
 
 base_rate = max(np.bincount(y_test_enc) / len(y_test_enc))
