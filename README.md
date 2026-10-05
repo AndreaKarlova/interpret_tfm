@@ -30,6 +30,10 @@ Launch the complete interactive benchmark with one click:
 
 It is built for Colab: the first cell clones this repository and imports its helpers from `kernel_louis` (`mnist_c`, `cnn`, `predictors`, plus the multiclass score/head/metric functions). Push any changes before running it there.
 
+### Waterbirds notebook
+
+[`notebooks/kernel_icl_leave_one_out_waterbirds.ipynb`](notebooks/kernel_icl_leave_one_out_waterbirds.ipynb) runs the same sections and tables as the MNIST-C notebook on Waterbirds, where the rare groups (landbird on water, waterbird on land) fail because they break a **background shortcut** rather than because they are scarce. Features come from an ImageNet ResNet-50 (cached in Drive), the test set is the official test split, and the official validation split supplies the τ/λ selection set and a group-balanced reference context. Data helpers are in `kernel_louis/waterbirds.py`. The earlier experiment is kept as `notebooks/kernel_icl_leave_one_out_waterbirds_old.ipynb`.
+
 ---
 
 ## Installation

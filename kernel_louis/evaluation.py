@@ -1,7 +1,7 @@
 """Evaluation metrics for subpopulation shift, detection AUC, interpretability,
 and mean ± SE aggregation over seeds."""
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
@@ -75,21 +75,28 @@ def group_accuracy_metrics(
     groups: np.ndarray,
     n_groups: int,
     rho: float,
+    rare_groups: Optional[Sequence[int]] = None,
 ) -> Dict[str, float]:
-    """Accuracy per group (group 0 = clean, 1..R = rare) plus summary metrics.
+    """Accuracy per group plus summary metrics.
+
+    rare_groups lists the rare groups; the others are common. The default
+    (MNIST-C) is group 0 = clean and groups 1..n_groups-1 = rare.
 
     worst_group   : min accuracy over the n_groups groups
     balanced_mean : mean of the group accuracies
-    context_mean  : (1 - rho) * acc_clean + rho * mean(acc_rare), rho = rare fraction
+    context_mean  : (1 - rho) * mean(acc_common) + rho * mean(acc_rare), rho = rare fraction
     worst_cell    : min accuracy over (class, group) cells
     """
     correct = np.asarray(y_pred) == np.asarray(y_true)
     groups = np.asarray(groups)
+    rare = list(range(1, n_groups)) if rare_groups is None else list(rare_groups)
+    common = [k for k in range(n_groups) if k not in rare]
     acc = [float(np.mean(correct[groups == k])) for k in range(n_groups)]
     out = {f"acc_g{k}": acc[k] for k in range(n_groups)}
     out["worst_group"] = min(acc)
     out["balanced_mean"] = float(np.mean(acc))
-    out["context_mean"] = (1.0 - rho) * acc[0] + rho * float(np.mean(acc[1:]))
+    out["context_mean"] = ((1.0 - rho) * float(np.mean([acc[k] for k in common]))
+                           + rho * float(np.mean([acc[k] for k in rare])))
     cells = []
     for c in np.unique(y_true):
         for k in range(n_groups):
@@ -113,14 +120,17 @@ def tail_composition(
     groups: np.ndarray,
     tau: float,
     n_groups: int,
+    rare_groups: Optional[Sequence[int]] = None,
 ) -> Dict[str, float]:
-    """What the tail {L_i >= quantile_tau(L)} contains (MNIST-C Table B / paper Table D.2).
+    """What the tail {L_i >= quantile_tau(L)} contains (Table B / paper Table D.2).
 
     Returns tail size, precision (fraction rare), recall (fraction of rare selected)
-    and the number of selected points from each group.
+    and the number of selected points from each group. rare_groups defaults to
+    every group except 0 (MNIST-C).
     """
     groups = np.asarray(groups)
-    row = compute_tail_precision_recall(L, groups > 0, [tau])[0]
+    rare = list(range(1, n_groups)) if rare_groups is None else list(rare_groups)
+    row = compute_tail_precision_recall(L, np.isin(groups, rare), [tau])[0]
     tail = np.asarray(L) >= np.quantile(L, tau)
     for k in range(n_groups):
         row[f"n_g{k}"] = int(np.sum(tail & (groups == k)))
