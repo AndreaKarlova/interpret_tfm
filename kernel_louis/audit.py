@@ -270,7 +270,12 @@ def compute_audit_metrics(
     - bias, rms: mean and root-mean-square of E = actual - head (Eq. 10)
     - rms_actual: RMS of the actual effects (the scale E is compared with); relative_rms = rms / rms_actual
     - sign_agreement: fraction of entries with |actual| > tol whose signs agree
-      (only the *true* effect is thresholded, App. C.3)
+      (only the *true* effect is thresholded, App. C.3). Entries where the head effect is
+      exactly 0 are left out: there the head predicts no change and so makes no claim about
+      direction (e.g. relabelling a point moves only the old and new class, so every other
+      class coordinate has head effect 0). Counting sign(0) as a disagreement would make
+      sign agreement depend on the number of classes rather than on the explanation.
+    - head_zero_share: share of the |actual| > tol entries left out for that reason
     - top_k_overlap: per query, overlap of the k context points with the largest
       |actual| and |head| effects, averaged over queries (App. C.3)
     """
@@ -285,7 +290,9 @@ def compute_audit_metrics(
     rms_actual = float(np.sqrt(np.mean(actual ** 2)))
 
     active = np.abs(actual) > tol
-    sign_agree = float(np.mean(np.sign(actual[active]) == np.sign(head[active]))) if active.any() else float("nan")
+    claimed = active & (head != 0)
+    sign_agree = float(np.mean(np.sign(actual[claimed]) == np.sign(head[claimed]))) if claimed.any() else float("nan")
+    head_zero_share = float(np.mean(head[active] == 0)) if active.any() else float("nan")
 
     k = min(top_k, actual.shape[0])
     overlaps = []
@@ -300,6 +307,7 @@ def compute_audit_metrics(
         "rms_actual": rms_actual,
         "relative_rms": rms / rms_actual if rms_actual > 0 else float("nan"),
         "sign_agreement": sign_agree,
+        "head_zero_share": head_zero_share,
         "top_k_overlap": float(np.mean(overlaps)) if overlaps else float("nan"),
         "max_abs_error": float(np.max(np.abs(E))) if E.size else 0.0,
     }

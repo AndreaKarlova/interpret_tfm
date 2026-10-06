@@ -208,6 +208,17 @@ def test_audit_metrics_follow_appendix_c3():
     # per query: query 0 top point 0 in both; query 1 top actual = point 2, top head = point 0 (tie by index)
     assert m["top_k_overlap"] == pytest.approx(0.5)
     assert m["relative_rms"] == pytest.approx(m["rms"] / m["rms_actual"])
+    assert m["head_zero_share"] == 0.0
+
+
+def test_sign_agreement_leaves_out_exact_zero_head_effects():
+    actual = np.array([[0.5, 0.2], [-0.2, -0.3]])
+    head = np.array([[0.4, 0.0], [-0.1, 0.0]])   # the head predicts no change for query 1
+    m = compute_audit_metrics(actual, head, tol=1e-3, top_k=1)
+    assert m["sign_agreement"] == 1.0            # both claimed entries agree
+    assert m["head_zero_share"] == pytest.approx(0.5)
+    m_none = compute_audit_metrics(actual, np.zeros_like(actual), tol=1e-3, top_k=1)
+    assert np.isnan(m_none["sign_agreement"]) and m_none["head_zero_share"] == 1.0
 
 
 def test_gp_frozen_deletion_matches_brute_force_refit():
